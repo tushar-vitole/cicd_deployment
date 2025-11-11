@@ -4,7 +4,7 @@ const app = express();
 
 // Define your API name and version
 const apiInfo = {
-  name: "Simple Node.js API",
+  name: "Simple API",
   version: "1.0.0"
 };
 

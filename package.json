@@ -1,6 +1,6 @@
 {
   "name": "simple-nodejs-api",
-  "version": "1.0.4",
+  "version": "1.0.5",
   "description": "A simple Node.js API that serves API name and version info on port 3000.",
   "main": "server.js",
   "scripts": {

@@ -1,109 +1,381 @@
-name: Build, Version, and Push to ECR (Dynamic Environment + OIDC)
+AWSTemplateFormatVersion: "2010-09-09"
+Description: "CC-DEMO: Full Infrastructure Stack - VPC + ECS Fargate + ALB"
 
-on:
-  push:
-    branches:
-      - dev
-      - prod
+# =========================================================================================
+# PARAMETERS: Application and ECS runtime configuration
+# =========================================================================================
+Parameters:
 
-permissions:
-  id-token: write
-  contents: write
+  LoadBalancerPort:
+    Type: Number
+    Default: 80
 
-jobs:
-  build-and-push:
-    runs-on: ubuntu-latest
-    environment: ${{ github.ref_name }}
+  HealthCheckPath:
+    Type: String
+    Default: "/"
 
-    steps:
-      # -----------------------------------------------------------------------
-      # STEP 0: CHECKOUT + SETUP
-      # -----------------------------------------------------------------------
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
+  Image:
+    Type: String
+    Description: "ECR image URI for ECS task definition"
 
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
+  ServiceName:
+    Type: String
+    Default: "CC-DEMO-API"
 
-      - name: Install dependencies
-        run: npm ci
+  ContainerPort:
+    Type: Number
+    Default: 3000
 
-      # -----------------------------------------------------------------------
-      # STEP 1: BUMP VERSION BEFORE BUILD
-      # -----------------------------------------------------------------------
-      - name: Bump version in package.json
-        id: version_bump
-        run: |
-          current_version=$(node -p "require('./package.json').version")
-          IFS='.' read -r major minor patch <<< "$current_version"
-          patch=$((patch + 1))
-          new_version="$major.$minor.$patch"
-          npm version "$new_version" --no-git-tag-version
-          echo "new_version=$new_version" >> $GITHUB_OUTPUT
+  TaskRole:
+    Type: String
+    Default: "CC-DEMO-ECS-TaskRole"
 
-      # -----------------------------------------------------------------------
-      # STEP 2: AWS LOGIN (OIDC)
-      # -----------------------------------------------------------------------
-      - name: Configure AWS credentials (OIDC)
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+  ExecutionRole:
+    Type: String
+    Default: "CC-DEMO-ECS-ExecutionRole"
 
-      # -----------------------------------------------------------------------
-      # STEP 3: DOCKER BUILD + PUSH IMAGE FIRST
-      # -----------------------------------------------------------------------
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
+  MinContainers:
+    Type: Number
+    Default: 1
 
-      - name: Build, tag, and push Docker image
-        id: docker_push
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ steps.version_bump.outputs.new_version }}
-        run: |
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_OUTPUT
+  MaxContainers:
+    Type: Number
+    Default: 3
 
-          echo "🚀 Building image: $IMAGE_URI"
-          docker build -t $IMAGE_URI .
-          docker push $IMAGE_URI
-          echo "✅ Image pushed successfully."
+  AutoScalingTargetValue:
+    Type: Number
+    Default: 60
 
-      # -----------------------------------------------------------------------
-      # STEP 4: DEPLOY CLOUDFORMATION (WITH NEW IMAGE)
-      # -----------------------------------------------------------------------
-      - name: Deploy CloudFormation stack with latest image
-        run: |
-          stack_name="CC-DEMO-Stack"
-          template_path="cloud/aws/stack.yaml"
 
-          IMAGE_URI="${{ steps.docker_push.outputs.IMAGE_URI }}"
+# =========================================================================================
+# SECTION: CC-DEMO BASE NETWORK (VPC, Subnets, Routes, NAT, IGW)
+# =========================================================================================
 
-          echo "🚀 Deploying with ECS image: $IMAGE_URI"
+Resources:
 
-          aws cloudformation deploy \
-            --stack-name $stack_name \
-            --template-file $template_path \
-            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --parameter-overrides Image=$IMAGE_URI
+  # --- COMPONENT: VPC root resource ---
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: 10.0.0.0/20
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-VPC"
 
-          echo "✅ CloudFormation deployment complete."
+  # --- COMPONENT: Public Subnets (Expose ALB) ---
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.0.0/22
+      AvailabilityZone: ap-south-1a
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PublicSubnet1a"
 
-      # -----------------------------------------------------------------------
-      # STEP 5: COMMIT UPDATED PACKAGE.JSON BACK TO REPO
-      # -----------------------------------------------------------------------
-      - name: Commit updated package.json
-        run: |
-          new_version=${{ steps.version_bump.outputs.new_version }}
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json || true
-          git commit -m "chore: bump version to $new_version [skip ci]" || echo "No changes to commit"
-          git push origin ${{ github.ref_name }} || echo "No changes pushed"
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.8.0/22
+      AvailabilityZone: ap-south-1b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PublicSubnet2b"
+
+  # --- COMPONENT: Internet Gateway for public outbound access ---
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # --- COMPONENT: NAT Gateway for private ECS tasks ---
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NAT:
+    DependsOn: AttachGateway
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+
+  # --- COMPONENT: Public Route Table and routes ---
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # --- COMPONENT: Private Subnets (ECS Fargate workloads) ---
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.4.0/22
+      AvailabilityZone: ap-south-1a
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PrivateSubnet1a"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: 10.0.12.0/22
+      AvailabilityZone: ap-south-1b
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PrivateSubnet2b"
+
+  # --- COMPONENT: Private routing with NAT access ---
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateNATRouteTableAssociation:
+    Type: AWS::EC2::Route
+    DependsOn: NAT
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NAT
+
+
+# =========================================================================================
+# SECTION: CC-DEMO SECURITY GROUPS
+# =========================================================================================
+
+  # --- SG: Load Balancer ingress from internet ---
+  LoadBalancerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn:
+      - VPC
+      - AttachGateway
+      - PublicSubnet1
+      - PublicSubnet2
+      - PublicRoute
+    Properties:
+      GroupDescription: "Allow HTTP inbound traffic to ALB"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 80
+          ToPort: 80
+          CidrIp: 0.0.0.0/0
+
+  # --- SG: ECS tasks allow inbound only from ALB ---
+  ContainerSecurityGroup:
+    Type: AWS::EC2::SecurityGroup
+    DependsOn:
+      - LoadBalancerSecurityGroup
+      - PrivateSubnet1
+      - PrivateSubnet2
+      - PrivateSubnetRouteTableAssociation1
+      - PrivateSubnetRouteTableAssociation2
+      - PrivateNATRouteTableAssociation
+    Properties:
+      GroupDescription: "Allow ALB to reach ECS service container port"
+      VpcId: !Ref VPC
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: !Ref ContainerPort
+          ToPort: !Ref ContainerPort
+          SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
+
+
+# =========================================================================================
+# SECTION: CC-DEMO ECS PLATFORM (Cluster, Logs, TaskDefinition, Service)
+# =========================================================================================
+
+  # --- ECS Cluster for CC-DEMO service workloads ---
+  Cluster:
+    Type: AWS::ECS::Cluster
+    DependsOn:
+      - PrivateNATRouteTableAssociation
+      - PublicSubnetRouteTableAssociation1
+      - PublicSubnetRouteTableAssociation2
+    Properties:
+      ClusterName: !Join ['', [!Ref ServiceName, "-CLUSTER"]]
+
+  # --- Log group for ECS task logs ---
+  LogGroup:
+    Type: AWS::Logs::LogGroup
+    DependsOn: Cluster
+    Properties:
+      LogGroupName: !Join ['', ["/ecs/", !Ref ServiceName, "-TaskDefinition"]]
+
+  # --- Task Definition for API container ---
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    DependsOn: LogGroup
+    Properties:
+      Family: !Join ['', [!Ref ServiceName, "-TaskDefinition"]]
+      NetworkMode: awsvpc
+      RequiresCompatibilities: [FARGATE]
+      Cpu: 256
+      Memory: 512
+      ExecutionRoleArn: !Ref ExecutionRole
+      TaskRoleArn: !Ref TaskRole
+      ContainerDefinitions:
+        - Name: !Ref ServiceName
+          Image: !Ref Image
+          PortMappings:
+            - ContainerPort: !Ref ContainerPort
+          LogConfiguration:
+            LogDriver: awslogs
+            Options:
+              awslogs-region: !Ref AWS::Region
+              awslogs-group: !Ref LogGroup
+              awslogs-stream-prefix: "ecs"
+
+
+# =========================================================================================
+# SECTION: CC-DEMO APPLICATION LOAD BALANCER
+# =========================================================================================
+
+  # --- ALB for routing public HTTP traffic ---
+  LoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - LoadBalancerSecurityGroup
+      - PublicSubnet1
+      - PublicSubnet2
+      - PublicRoute
+    Properties:
+      Scheme: internet-facing
+      SecurityGroups:
+        - !Ref LoadBalancerSecurityGroup
+      Subnets:
+        - !Ref PublicSubnet1
+        - !Ref PublicSubnet2
+
+  # --- Target Group for ECS service instances ---
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+      - LoadBalancer
+      - ContainerSecurityGroup
+    Properties:
+      Name: !Join ['', [!Ref ServiceName, "-TG"]]
+      Protocol: HTTP
+      Port: 80
+      TargetType: ip
+      HealthCheckPath: !Ref HealthCheckPath
+      VpcId: !Ref VPC
+
+  # --- Listener for forwarding traffic to ECS target group ---
+  ListenerHTTP:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: TargetGroup
+    Properties:
+      LoadBalancerArn: !Ref LoadBalancer
+      Port: !Ref LoadBalancerPort
+      Protocol: HTTP
+      DefaultActions:
+        - Type: forward
+          TargetGroupArn: !Ref TargetGroup
+
+
+# =========================================================================================
+# SECTION: CC-DEMO ECS SERVICE (Final Deployment Component)
+# =========================================================================================
+
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn:
+      - ListenerHTTP
+      - TargetGroup
+      - TaskDefinition
+      - Cluster
+    Properties:
+      ServiceName: !Join ['', [!Ref ServiceName, "-SERVICE"]]
+      Cluster: !Ref Cluster
+      TaskDefinition: !Ref TaskDefinition
+      DesiredCount: !Ref MinContainers
+      LaunchType: FARGATE
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: ENABLED
+          Subnets:
+            - !Ref PrivateSubnet1
+            - !Ref PrivateSubnet2
+          SecurityGroups:
+            - !Ref ContainerSecurityGroup
+      LoadBalancers:
+        - ContainerName: !Ref ServiceName
+          ContainerPort: !Ref ContainerPort
+          TargetGroupArn: !Ref TargetGroup
+
+
+# =========================================================================================
+# OUTPUTS
+# =========================================================================================
+
+Outputs:
+
+  VPCID:
+    Description: "CC-DEMO VPC ID"
+    Value: !Ref VPC
+
+  PublicSubnet1:
+    Description: "Public Subnet 1a for ALB"
+    Value: !Ref PublicSubnet1
+
+  PublicSubnet2:
+    Description: "Public Subnet 2b for ALB"
+    Value: !Ref PublicSubnet2
+
+  PrivateSubnet1:
+    Description: "Private Subnet 1a for ECS Tasks"
+    Value: !Ref PrivateSubnet1
+
+  PrivateSubnet2:
+    Description: "Private Subnet 2b for ECS Tasks"
+    Value: !Ref PrivateSubnet2
+
+  ALBDNS:
+    Description: "Public DNS of Application Load Balancer"
+    Value: !GetAtt LoadBalancer.DNSName

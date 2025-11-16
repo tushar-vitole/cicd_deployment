@@ -1,5 +1,5 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: ECS Fargate infra using subnet names (CC-DEMO-*), VPC from name, HTTP only.
+Description: "ECS Fargate infra using subnet names (CC-DEMO-*), VPC from name, HTTP only."
 
 Parameters:
 
@@ -11,23 +11,23 @@ Parameters:
   # ---------- Public Subnets (Load Balancer) ----------
   SubnetA:
     Type: AWS::EC2::Subnet::Id
-    Description: Public Subnet A (Name: CC-DEMO-PublicSubnet1a)
+    Description: "Public Subnet A (Name: CC-DEMO-PublicSubnet1a)"
     Default: CC-DEMO-PublicSubnet1a
 
   SubnetB:
     Type: AWS::EC2::Subnet::Id
-    Description: Public Subnet B (Name: CC-DEMO-PublicSubnet2b)
+    Description: "Public Subnet B (Name: CC-DEMO-PublicSubnet2b)"
     Default: CC-DEMO-PublicSubnet2b
 
   # ---------- Private Subnets (ECS Tasks) ----------
   ContainerSubnetA:
     Type: AWS::EC2::Subnet::Id
-    Description: Private Subnet A (Name: CC-DEMO-PrivateSubnet1a)
+    Description: "Private Subnet A (Name: CC-DEMO-PrivateSubnet1a)"
     Default: CC-DEMO-PrivateSubnet1a
 
   ContainerSubnetB:
     Type: AWS::EC2::Subnet::Id
-    Description: Private Subnet B (Name: CC-DEMO-PrivateSubnet2b)
+    Description: "Private Subnet B (Name: CC-DEMO-PrivateSubnet2b)"
     Default: CC-DEMO-PrivateSubnet2b
 
   LoadBalancerPort:
@@ -36,15 +36,15 @@ Parameters:
 
   HealthCheckPath:
     Type: String
-    Default: /
+    Default: "/"
 
   Image:
     Type: String
-    Default: 933774366963.dkr.ecr.ap-south-1.amazonaws.com/api-repo:1.0.5
+    Default: "933774366963.dkr.ecr.ap-south-1.amazonaws.com/api-repo:1.0.5"
 
   ServiceName:
     Type: String
-    Default: CC-DEMO-API
+    Default: "CC-DEMO-API"
 
   ContainerPort:
     Type: Number
@@ -52,11 +52,11 @@ Parameters:
 
   TaskRole:
     Type: String
-    Default: CC-DEMO-ECS-TaskRole
+    Default: "CC-DEMO-ECS-TaskRole"
 
   AutoScalingRole:
     Type: String
-    Default: CC-DEMO-ECS-AutoScalingRole
+    Default: "CC-DEMO-ECS-AutoScalingRole"
 
   MinContainers:
     Type: Number
@@ -72,15 +72,19 @@ Parameters:
 
   ExecutionRole:
     Type: String
-    Default: CC-DEMO-ECS-ExecutionRole
+    Default: "CC-DEMO-ECS-ExecutionRole"
 
 
 Resources:
 
+  # ---------------------------------------------------------
+  # SECURITY GROUPS
+  # ---------------------------------------------------------
+
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: CC-DEMO-API-LoadBalancer-SG
+      GroupName: "CC-DEMO-API-LoadBalancer-SG"
       GroupDescription: "Allow HTTP (80) from internet"
       VpcId: !Ref VPC
       SecurityGroupIngress:
@@ -92,7 +96,7 @@ Resources:
   ContainerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     Properties:
-      GroupName: CC-DEMO-API-Container-SG
+      GroupName: "CC-DEMO-API-Container-SG"
       GroupDescription: "Allow container traffic from ALB"
       VpcId: !Ref VPC
       SecurityGroupIngress:
@@ -101,21 +105,36 @@ Resources:
           ToPort: !Ref ContainerPort
           SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
 
+
+  # ---------------------------------------------------------
+  # ECS CLUSTER
+  # ---------------------------------------------------------
+
   Cluster:
     Type: AWS::ECS::Cluster
     Properties:
-      ClusterName: !Join ['', [!Ref ServiceName, -CLUSTER]]
+      ClusterName: !Join ['', [!Ref ServiceName, "-CLUSTER"]]
+
+
+  # ---------------------------------------------------------
+  # LOG GROUP
+  # ---------------------------------------------------------
 
   LogGroup:
     Type: AWS::Logs::LogGroup
     Properties:
-      LogGroupName: !Join ['', [/ecs/, !Ref ServiceName, TaskDefinition]]
+      LogGroupName: !Join ['', ["/ecs/", !Ref ServiceName, "-TaskDefinition"]]
+
+
+  # ---------------------------------------------------------
+  # TASK DEFINITION
+  # ---------------------------------------------------------
 
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     DependsOn: LogGroup
     Properties:
-      Family: !Join ['', [!Ref ServiceName, -TaskDefinition]]
+      Family: !Join ['', [!Ref ServiceName, "-TaskDefinition"]]
       NetworkMode: awsvpc
       RequiresCompatibilities: [FARGATE]
       Cpu: 256
@@ -133,15 +152,20 @@ Resources:
             Options:
               awslogs-region: !Ref AWS::Region
               awslogs-group: !Ref LogGroup
-              awslogs-stream-prefix: ecs
+              awslogs-stream-prefix: "ecs"
+
+
+  # ---------------------------------------------------------
+  # LOAD BALANCER + LISTENER
+  # ---------------------------------------------------------
 
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     Properties:
       LoadBalancerAttributes:
         - Key: idle_timeout.timeout_seconds
-          Value: 60
-      Name: !Join ['', [!Ref ServiceName, -LB]]
+          Value: "60"
+      Name: !Join ['', [!Ref ServiceName, "-LB"]]
       Scheme: internet-facing
       SecurityGroups:
         - !Ref LoadBalancerSecurityGroup
@@ -157,12 +181,12 @@ Resources:
       HealthCheckTimeoutSeconds: 5
       UnhealthyThresholdCount: 2
       HealthyThresholdCount: 2
-      Name: !Join ['', [!Ref ServiceName, -TG]]
+      Name: !Join ['', [!Ref ServiceName, "-TG"]]
       Port: 80
       Protocol: HTTP
       TargetGroupAttributes:
         - Key: deregistration_delay.timeout_seconds
-          Value: 60
+          Value: "60"
       TargetType: ip
       VpcId: !Ref VPC
 
@@ -176,12 +200,17 @@ Resources:
       Port: !Ref LoadBalancerPort
       Protocol: HTTP
 
+
+  # ---------------------------------------------------------
+  # ECS SERVICE
+  # ---------------------------------------------------------
+
   Service:
     Type: AWS::ECS::Service
     DependsOn:
       - ListenerHTTP
     Properties:
-      ServiceName: !Join ['', [!Ref ServiceName, -SERVICE]]
+      ServiceName: !Join ['', [!Ref ServiceName, "-SERVICE"]]
       Cluster: !Ref Cluster
       TaskDefinition: !Ref TaskDefinition
       DeploymentConfiguration:
@@ -203,10 +232,15 @@ Resources:
           ContainerPort: !Ref ContainerPort
           TargetGroupArn: !Ref TargetGroup
 
+
+  # ---------------------------------------------------------
+  # AUTOSCALING
+  # ---------------------------------------------------------
+
   ECSAutoScalingRole:
     Type: AWS::IAM::Role
     Properties:
-      RoleName: !Join ['', [!Ref ServiceName, -AutoScalingRole]]
+      RoleName: !Join ['', [!Ref ServiceName, "-AutoScalingRole"]]
       AssumeRolePolicyDocument:
         Statement:
           - Effect: Allow
@@ -221,15 +255,15 @@ Resources:
     Properties:
       MinCapacity: !Ref MinContainers
       MaxCapacity: !Ref MaxContainers
-      ResourceId: !Join ['/', [service, !Ref Cluster, !GetAtt Service.Name]]
-      ScalableDimension: ecs:service:DesiredCount
+      ResourceId: !Join ['/', ["service", !Ref Cluster, !GetAtt Service.Name]]
+      ScalableDimension: "ecs:service:DesiredCount"
       ServiceNamespace: ecs
       RoleARN: !GetAtt ECSAutoScalingRole.Arn
 
   AutoScalingPolicy:
     Type: AWS::ApplicationAutoScaling::ScalingPolicy
     Properties:
-      PolicyName: !Join ['', [!Ref ServiceName, AutoScalingPolicy]]
+      PolicyName: !Join ['', [!Ref ServiceName, "AutoScalingPolicy"]]
       PolicyType: TargetTrackingScaling
       ScalingTargetId: !Ref AutoScalingTarget
       TargetTrackingScalingPolicyConfiguration:
@@ -242,5 +276,5 @@ Resources:
 
 Outputs:
   LoadBalancerDNS:
-    Description: ALB DNS Name
+    Description: "ALB DNS Name"
     Value: !GetAtt LoadBalancer.DNSName

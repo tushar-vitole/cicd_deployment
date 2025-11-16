@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Merged Template: VPC + ECS Fargate + ALB (Correct SG + Dependency Ordering)"
+Description: "CC-DEMO: Full Infrastructure Stack - VPC + ECS Fargate + ALB"
 
 # =========================================================================================
-# PARAMETERS
+# PARAMETERS: Application and ECS runtime configuration
 # =========================================================================================
 Parameters:
 
@@ -48,11 +48,12 @@ Parameters:
 
 
 # =========================================================================================
-# VPC + SUBNETS + ROUTES
+# SECTION: CC-DEMO BASE NETWORK (VPC, Subnets, Routes, NAT, IGW)
 # =========================================================================================
 
 Resources:
 
+  # --- COMPONENT: VPC root resource ---
   VPC:
     Type: AWS::EC2::VPC
     Properties:
@@ -63,6 +64,7 @@ Resources:
         - Key: Name
           Value: "CC-DEMO-VPC"
 
+  # --- COMPONENT: Public Subnets (Expose ALB) ---
   PublicSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -85,6 +87,7 @@ Resources:
         - Key: Name
           Value: "CC-DEMO-PublicSubnet2b"
 
+  # --- COMPONENT: Internet Gateway for public outbound access ---
   InternetGateway:
     Type: AWS::EC2::InternetGateway
 
@@ -94,6 +97,7 @@ Resources:
       VpcId: !Ref VPC
       InternetGatewayId: !Ref InternetGateway
 
+  # --- COMPONENT: NAT Gateway for private ECS tasks ---
   EIP:
     Type: AWS::EC2::EIP
     Properties:
@@ -106,6 +110,7 @@ Resources:
       AllocationId: !GetAtt EIP.AllocationId
       SubnetId: !Ref PublicSubnet1
 
+  # --- COMPONENT: Public Route Table and routes ---
   PublicRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -131,6 +136,7 @@ Resources:
       SubnetId: !Ref PublicSubnet2
       RouteTableId: !Ref PublicRouteTable
 
+  # --- COMPONENT: Private Subnets (ECS Fargate workloads) ---
   PrivateSubnet1:
     Type: AWS::EC2::Subnet
     Properties:
@@ -151,6 +157,7 @@ Resources:
         - Key: Name
           Value: "CC-DEMO-PrivateSubnet2b"
 
+  # --- COMPONENT: Private routing with NAT access ---
   PrivateRouteTable:
     Type: AWS::EC2::RouteTable
     Properties:
@@ -178,12 +185,10 @@ Resources:
 
 
 # =========================================================================================
-# STRICT SG / ALB / ECS DEPENDENCY ZONE (FIXED)
+# SECTION: CC-DEMO SECURITY GROUPS
 # =========================================================================================
 
-  # ---------------------------------------------------------
-  # LoadBalancerSecurityGroup AFTER VPC is 100% created
-  # ---------------------------------------------------------
+  # --- SG: Load Balancer ingress from internet ---
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     DependsOn:
@@ -192,10 +197,8 @@ Resources:
       - PublicSubnet1
       - PublicSubnet2
       - PublicRoute
-      - PublicSubnetRouteTableAssociation1
-      - PublicSubnetRouteTableAssociation2
     Properties:
-      GroupDescription: "Allow HTTP"
+      GroupDescription: "Allow HTTP inbound traffic to ALB"
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -203,10 +206,7 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
 
-
-  # ---------------------------------------------------------
-  # ContainerSecurityGroup AFTER LoadBalancerSG + Private networking
-  # ---------------------------------------------------------
+  # --- SG: ECS tasks allow inbound only from ALB ---
   ContainerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     DependsOn:
@@ -217,7 +217,7 @@ Resources:
       - PrivateSubnetRouteTableAssociation2
       - PrivateNATRouteTableAssociation
     Properties:
-      GroupDescription: "Allow ALB → ECS"
+      GroupDescription: "Allow ALB to reach ECS service container port"
       VpcId: !Ref VPC
       SecurityGroupIngress:
         - IpProtocol: tcp
@@ -226,9 +226,11 @@ Resources:
           SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
 
 
-  # ---------------------------------------------------------
-  # ECS Cluster AFTER VPC is ready
-  # ---------------------------------------------------------
+# =========================================================================================
+# SECTION: CC-DEMO ECS PLATFORM (Cluster, Logs, TaskDefinition, Service)
+# =========================================================================================
+
+  # --- ECS Cluster for CC-DEMO service workloads ---
   Cluster:
     Type: AWS::ECS::Cluster
     DependsOn:
@@ -238,12 +240,14 @@ Resources:
     Properties:
       ClusterName: !Join ['', [!Ref ServiceName, "-CLUSTER"]]
 
+  # --- Log group for ECS task logs ---
   LogGroup:
     Type: AWS::Logs::LogGroup
     DependsOn: Cluster
     Properties:
       LogGroupName: !Join ['', ["/ecs/", !Ref ServiceName, "-TaskDefinition"]]
 
+  # --- Task Definition for API container ---
   TaskDefinition:
     Type: AWS::ECS::TaskDefinition
     DependsOn: LogGroup
@@ -267,9 +271,12 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-stream-prefix: "ecs"
 
-  # ---------------------------------------------------------
-  # Load Balancer AFTER SG + Subnets are ready
-  # ---------------------------------------------------------
+
+# =========================================================================================
+# SECTION: CC-DEMO APPLICATION LOAD BALANCER
+# =========================================================================================
+
+  # --- ALB for routing public HTTP traffic ---
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     DependsOn:
@@ -285,6 +292,7 @@ Resources:
         - !Ref PublicSubnet1
         - !Ref PublicSubnet2
 
+  # --- Target Group for ECS service instances ---
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
     DependsOn:
@@ -298,6 +306,7 @@ Resources:
       HealthCheckPath: !Ref HealthCheckPath
       VpcId: !Ref VPC
 
+  # --- Listener for forwarding traffic to ECS target group ---
   ListenerHTTP:
     Type: AWS::ElasticLoadBalancingV2::Listener
     DependsOn: TargetGroup
@@ -309,9 +318,11 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
-  # ---------------------------------------------------------
-  # ECS Service LAST (depends on EVERYTHING)
-  # ---------------------------------------------------------
+
+# =========================================================================================
+# SECTION: CC-DEMO ECS SERVICE (Final Deployment Component)
+# =========================================================================================
+
   Service:
     Type: AWS::ECS::Service
     DependsOn:
@@ -346,17 +357,25 @@ Resources:
 Outputs:
 
   VPCID:
+    Description: "CC-DEMO VPC ID"
     Value: !Ref VPC
 
   PublicSubnet1:
+    Description: "Public Subnet 1a for ALB"
     Value: !Ref PublicSubnet1
+
   PublicSubnet2:
+    Description: "Public Subnet 2b for ALB"
     Value: !Ref PublicSubnet2
 
   PrivateSubnet1:
+    Description: "Private Subnet 1a for ECS Tasks"
     Value: !Ref PrivateSubnet1
+
   PrivateSubnet2:
+    Description: "Private Subnet 2b for ECS Tasks"
     Value: !Ref PrivateSubnet2
 
   ALBDNS:
+    Description: "Public DNS of Application Load Balancer"
     Value: !GetAtt LoadBalancer.DNSName

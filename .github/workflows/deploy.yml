@@ -1,109 +1,63 @@
-name: Build, Version, and Push to ECR (Dynamic Environment + OIDC)
+name: Create IAM User (ReadOnly)
 
 on:
   push:
     branches:
-      - dev
-      - prod
+      - user
+  workflow_dispatch:
+    inputs:
+      username:
+        description: "IAM username to create"
+        required: true
 
 permissions:
   id-token: write
-  contents: write
+  contents: read
 
 jobs:
-  build-and-push:
+  create-iam-user:
     runs-on: ubuntu-latest
-    environment: ${{ github.ref_name }}
 
     steps:
-      # -----------------------------------------------------------------------
-      # STEP 0: CHECKOUT + SETUP
-      # -----------------------------------------------------------------------
-      - name: Checkout code
-        uses: actions/checkout@v4
-        with:
-          persist-credentials: true
-
-      - name: Set up Node.js
-        uses: actions/setup-node@v4
-        with:
-          node-version: '18'
-
-      - name: Install dependencies
-        run: npm ci
-
-      # -----------------------------------------------------------------------
-      # STEP 1: BUMP VERSION BEFORE BUILD
-      # -----------------------------------------------------------------------
-      - name: Bump version in package.json
-        id: version_bump
-        run: |
-          current_version=$(node -p "require('./package.json').version")
-          IFS='.' read -r major minor patch <<< "$current_version"
-          patch=$((patch + 1))
-          new_version="$major.$minor.$patch"
-          npm version "$new_version" --no-git-tag-version
-          echo "new_version=$new_version" >> $GITHUB_OUTPUT
-
-      # -----------------------------------------------------------------------
-      # STEP 2: AWS LOGIN (OIDC)
-      # -----------------------------------------------------------------------
-      - name: Configure AWS credentials (OIDC)
+      - name: Configure AWS Credentials via OIDC
         uses: aws-actions/configure-aws-credentials@v4
         with:
-          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
-          aws-region: ${{ secrets.AWS_REGION }}
+          role-to-assume: arn:aws:iam::<ACCOUNT-ID>:role/<YOUR-GITHUB-OIDC-ROLE>
+          aws-region: ap-south-1
 
-      # -----------------------------------------------------------------------
-      # STEP 3: DOCKER BUILD + PUSH IMAGE FIRST
-      # -----------------------------------------------------------------------
-      - name: Login to Amazon ECR
-        id: login-ecr
-        uses: aws-actions/amazon-ecr-login@v2
-
-      - name: Build, tag, and push Docker image
-        id: docker_push
-        env:
-          ECR_REGISTRY: ${{ steps.login-ecr.outputs.registry }}
-          ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
-          IMAGE_TAG: ${{ steps.version_bump.outputs.new_version }}
+      - name: Get AWS Account ID
+        id: acct
         run: |
-          IMAGE_URI="$ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
-          echo "IMAGE_URI=$IMAGE_URI" >> $GITHUB_OUTPUT
+          ACCOUNT_ID=$(aws sts get-caller-identity --query Account --output text)
+          echo "ACCOUNT_ID=$ACCOUNT_ID" >> $GITHUB_ENV
 
-          echo "🚀 Building image: $IMAGE_URI"
-          docker build -t $IMAGE_URI .
-          docker push $IMAGE_URI
-          echo "✅ Image pushed successfully."
-
-      # -----------------------------------------------------------------------
-      # STEP 4: DEPLOY CLOUDFORMATION (WITH NEW IMAGE)
-      # -----------------------------------------------------------------------
-      - name: Deploy CloudFormation stack with latest image
+      - name: Create IAM User
         run: |
-          stack_name="CC-DEMO-Stack"
-          template_path="cloud/aws/stack.yaml"
+          aws iam create-user --user-name "${{ github.event.inputs.username }}" \
+          || echo "User already exists"
 
-          IMAGE_URI="${{ steps.docker_push.outputs.IMAGE_URI }}"
-
-          echo "🚀 Deploying with ECS image: $IMAGE_URI"
-
-          aws cloudformation deploy \
-            --stack-name $stack_name \
-            --template-file $template_path \
-            --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND \
-            --parameter-overrides Image=$IMAGE_URI
-
-          echo "✅ CloudFormation deployment complete."
-
-      # -----------------------------------------------------------------------
-      # STEP 5: COMMIT UPDATED PACKAGE.JSON BACK TO REPO
-      # -----------------------------------------------------------------------
-      - name: Commit updated package.json
+      - name: Attach ReadOnlyAccess Policy
         run: |
-          new_version=${{ steps.version_bump.outputs.new_version }}
-          git config --global user.name "github-actions[bot]"
-          git config --global user.email "github-actions[bot]@users.noreply.github.com"
-          git add package.json package-lock.json || true
-          git commit -m "chore: bump version to $new_version [skip ci]" || echo "No changes to commit"
-          git push origin ${{ github.ref_name }} || echo "No changes pushed"
+          aws iam attach-user-policy \
+            --user-name "${{ github.event.inputs.username }}" \
+            --policy-arn arn:aws:iam::aws:policy/ReadOnlyAccess
+
+      - name: Create Login Password
+        run: |
+          PASSWORD=$(openssl rand -base64 14)
+          aws iam create-login-profile \
+            --user-name "${{ github.event.inputs.username }}" \
+            --password "$PASSWORD" \
+            --password-reset-required || echo "Login profile already exists"
+          echo "PASSWORD=$PASSWORD" >> $GITHUB_ENV
+
+      - name: Output Credentials
+        run: |
+          echo "============================================="
+          echo " IAM USER CREATED SUCCESSFULLY "
+          echo "============================================="
+          echo "AWS Account ID: $ACCOUNT_ID"
+          echo "IAM Username : ${{ github.event.inputs.username }}"
+          echo "Password     : $PASSWORD"
+          echo "Login URL    : https://$ACCOUNT_ID.signin.aws.amazon.com/console"
+          echo "============================================="

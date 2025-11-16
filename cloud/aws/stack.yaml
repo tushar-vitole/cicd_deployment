@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "Merged Template: VPC + ECS Fargate + ALB"
+Description: "VPC + ECS Fargate + ALB"
 
 # =========================================================================================
-# PARAMETERS (only ECS-related)
+# PARAMETERS (ECS-related only)
 # =========================================================================================
 Parameters:
 
@@ -48,7 +48,7 @@ Parameters:
 
 
 # =========================================================================================
-# VPC + SUBNETS + ROUTES 
+# VPC + SUBNETS + ROUTES
 # =========================================================================================
 
 Resources:
@@ -170,6 +170,7 @@ Resources:
 
   PrivateNATRouteTableAssociation:
     Type: AWS::EC2::Route
+    DependsOn: NAT
     Properties:
       RouteTableId: !Ref PrivateRouteTable
       DestinationCidrBlock: 0.0.0.0/0
@@ -177,11 +178,15 @@ Resources:
 
 
 # =========================================================================================
-# ECS + ALB (NOW USING CREATED VPC + SUBNETS)
+# ECS + ALB WITH STRICT DEPENDENCY ORDERING
 # =========================================================================================
 
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    DependsOn:
+      - PrivateNATRouteTableAssociation
+      - PublicSubnetRouteTableAssociation1
+      - PublicSubnetRouteTableAssociation2
     Properties:
       GroupDescription: "Allow HTTP"
       VpcId: !Ref VPC
@@ -193,6 +198,7 @@ Resources:
 
   ContainerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
+    DependsOn: LoadBalancerSecurityGroup
     Properties:
       GroupDescription: "Allow ALB → ECS"
       VpcId: !Ref VPC
@@ -204,11 +210,16 @@ Resources:
 
   Cluster:
     Type: AWS::ECS::Cluster
+    DependsOn:
+      - PrivateNATRouteTableAssociation
+      - PublicSubnetRouteTableAssociation1
+      - PublicSubnetRouteTableAssociation2
     Properties:
       ClusterName: !Join ['', [!Ref ServiceName, "-CLUSTER"]]
 
   LogGroup:
     Type: AWS::Logs::LogGroup
+    DependsOn: Cluster
     Properties:
       LogGroupName: !Join ['', ["/ecs/", !Ref ServiceName, "-TaskDefinition"]]
 
@@ -237,6 +248,11 @@ Resources:
 
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    DependsOn:
+      - LoadBalancerSecurityGroup
+      - PublicSubnet1
+      - PublicSubnet2
+      - PublicRoute
     Properties:
       Scheme: internet-facing
       SecurityGroups:
@@ -247,6 +263,9 @@ Resources:
 
   TargetGroup:
     Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    DependsOn:
+      - LoadBalancer
+      - ContainerSecurityGroup
     Properties:
       Name: !Join ['', [!Ref ServiceName, "-TG"]]
       Protocol: HTTP
@@ -257,6 +276,7 @@ Resources:
 
   ListenerHTTP:
     Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn: TargetGroup
     Properties:
       LoadBalancerArn: !Ref LoadBalancer
       Port: !Ref LoadBalancerPort
@@ -267,7 +287,11 @@ Resources:
 
   Service:
     Type: AWS::ECS::Service
-    DependsOn: ListenerHTTP
+    DependsOn:
+      - ListenerHTTP
+      - TargetGroup
+      - TaskDefinition
+      - Cluster
     Properties:
       ServiceName: !Join ['', [!Ref ServiceName, "-SERVICE"]]
       Cluster: !Ref Cluster

@@ -1,0 +1,208 @@
+AWSTemplateFormatVersion: "2010-09-09"
+
+Description: "VPC with 2 Public + 2 Private Subnets across ap-south-1a & ap-south-1b"
+
+Parameters:
+
+  CIDR:
+    Default: 10.0.0.0/20
+    Type: String
+
+  PublicCidrBlock1a:
+    Default: 10.0.0.0/22
+    Type: String
+
+  PublicCidrBlock2b:
+    Default: 10.0.8.0/22
+    Type: String
+
+  PublicSubnet1AZa:
+    Default: ap-south-1a
+    Type: AWS::EC2::AvailabilityZone::Name
+
+  PublicSubnet2AZ2b:
+    Default: ap-south-1b
+    Type: AWS::EC2::AvailabilityZone::Name
+
+  PrivateCidrBlock1a:
+    Default: 10.0.4.0/22
+    Type: String
+
+  PrivateSubnet1AZ1a:
+    Default: ap-south-1a
+    Type: AWS::EC2::AvailabilityZone::Name
+
+  PrivateCidrBlock2b:
+    Default: 10.0.12.0/22
+    Type: String
+
+  PrivateSubnet2AZ2b:
+    Default: ap-south-1b
+    Type: AWS::EC2::AvailabilityZone::Name
+
+
+Resources:
+
+  VPC:
+    Type: AWS::EC2::VPC
+    Properties:
+      CidrBlock: !Ref CIDR
+      EnableDnsSupport: true
+      EnableDnsHostnames: true
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-VPC"
+
+  # -------- Public Subnets ----------
+  PublicSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicCidrBlock1a
+      AvailabilityZone: !Ref PublicSubnet1AZa
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PublicSubnet1a"
+
+  PublicSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PublicCidrBlock2b
+      AvailabilityZone: !Ref PublicSubnet2AZ2b
+      MapPublicIpOnLaunch: true
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PublicSubnet2b"
+
+  # -------- Internet Gateway ----------
+  InternetGateway:
+    Type: AWS::EC2::InternetGateway
+    Properties:
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-InternetGateway"
+
+  AttachGateway:
+    Type: AWS::EC2::VPCGatewayAttachment
+    Properties:
+      VpcId: !Ref VPC
+      InternetGatewayId: !Ref InternetGateway
+
+  # -------- NAT Gateway ----------
+  EIP:
+    Type: AWS::EC2::EIP
+    Properties:
+      Domain: vpc
+
+  NAT:
+    DependsOn: AttachGateway
+    Type: AWS::EC2::NatGateway
+    Properties:
+      AllocationId: !GetAtt EIP.AllocationId
+      SubnetId: !Ref PublicSubnet1
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-NatGateway"
+
+  # -------- Public Route Table ----------
+  PublicRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PublicRouteTable"
+
+  PublicRoute:
+    Type: AWS::EC2::Route
+    DependsOn: AttachGateway
+    Properties:
+      RouteTableId: !Ref PublicRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      GatewayId: !Ref InternetGateway
+
+  PublicSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet1
+      RouteTableId: !Ref PublicRouteTable
+
+  PublicSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PublicSubnet2
+      RouteTableId: !Ref PublicRouteTable
+
+  # -------- Private Subnets ----------
+  PrivateSubnet1:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateCidrBlock1a
+      AvailabilityZone: !Ref PrivateSubnet1AZ1a
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PrivateSubnet1a"
+
+  PrivateSubnet2:
+    Type: AWS::EC2::Subnet
+    Properties:
+      VpcId: !Ref VPC
+      CidrBlock: !Ref PrivateCidrBlock2b
+      AvailabilityZone: !Ref PrivateSubnet2AZ2b
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PrivateSubnet2b"
+
+  # -------- Private Route Table ----------
+  PrivateRouteTable:
+    Type: AWS::EC2::RouteTable
+    Properties:
+      VpcId: !Ref VPC
+      Tags:
+        - Key: Name
+          Value: "CC-DEMO-PrivateRouteTable"
+
+  PrivateSubnetRouteTableAssociation1:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet1
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateSubnetRouteTableAssociation2:
+    Type: AWS::EC2::SubnetRouteTableAssociation
+    Properties:
+      SubnetId: !Ref PrivateSubnet2
+      RouteTableId: !Ref PrivateRouteTable
+
+  PrivateNATRouteTableAssociation:
+    Type: AWS::EC2::Route
+    Properties:
+      RouteTableId: !Ref PrivateRouteTable
+      DestinationCidrBlock: 0.0.0.0/0
+      NatGatewayId: !Ref NAT
+
+
+Outputs:
+
+  QAVPC:
+    Description: Newly created VPC ID
+    Value: !Ref VPC
+
+  QAPublicSubnet1a:
+    Description: Public subnet in ap-south-1a
+    Value: !Ref PublicSubnet1
+
+  QAPublicSubnet2b:
+    Description: Public subnet in ap-south-1b
+    Value: !Ref PublicSubnet2
+
+  QAPrivateSubnet1a:
+    Description: Private subnet in ap-south-1a
+    Value: !Ref PrivateSubnet1
+
+  QAPrivateSubnet2b:
+    Description: Private subnet in ap-south-1b
+    Value: !Ref PrivateSubnet2

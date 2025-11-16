@@ -5,17 +5,14 @@ on:
     branches:
       - dev
       - prod
-      # 👆 Add more branches as needed
 
 permissions:
-  id-token: write   # ✅ Required for OIDC
-  contents: write   # ✅ Needed for committing updated package.json
+  id-token: write
+  contents: write
 
 jobs:
   build-and-push:
     runs-on: ubuntu-latest
-
-    # 🧠 Dynamically set environment name based on branch
     environment: ${{ github.ref_name }}
 
     steps:
@@ -35,24 +32,57 @@ jobs:
       - name: Bump version in package.json
         id: version_bump
         run: |
-          echo "🔍 Reading current version..."
           current_version=$(node -p "require('./package.json').version")
-          echo "Current version: $current_version"
-
           IFS='.' read -r major minor patch <<< "$current_version"
           patch=$((patch + 1))
           new_version="$major.$minor.$patch"
-
-          echo "🔢 New version: $new_version"
-
           npm version $new_version --no-git-tag-version
           echo "new_version=$new_version" >> $GITHUB_OUTPUT
 
-      - name: Configure AWS credentials using OIDC
+      - name: Configure AWS credentials (OIDC)
         uses: aws-actions/configure-aws-credentials@v4
         with:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
+
+      # ---------------------------------------------------------
+      # STEP: CHECK IF VPC EXISTS — IF NOT, CREATE USING CLOUDFORMATION
+      # ---------------------------------------------------------
+      - name: Check and create VPC if missing
+        id: vpc_check
+        run: |
+          echo "🔍 Checking for VPC named 'CC-DEMO-VPC'..."
+
+          vpc_id=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:Name,Values=CC-DEMO-VPC" \
+            --query "Vpcs[0].VpcId" \
+            --output text)
+
+          if [[ "$vpc_id" == "None" ]]; then
+            echo "⚠️ VPC not found. Creating VPC from CloudFormation template..."
+            
+            stack_name="CC-DEMO-VPC-Stack"
+
+            aws cloudformation deploy \
+              --stack-name $stack_name \
+              --template-file cloud/aws/vpc/vpc.yaml \
+              --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
+
+            echo "⏳ Waiting for VPC stack creation to complete..."
+            aws cloudformation wait stack-create-complete --stack-name $stack_name
+            
+            echo "📘 Fetching new VPC Id..."
+            vpc_id=$(aws ec2 describe-vpcs \
+              --filters "Name=tag:Name,Values=CC-DEMO-VPC" \
+              --query "Vpcs[0].VpcId" --output text)
+
+            echo "✅ VPC created: $vpc_id"
+
+          else
+            echo "✅ VPC already exists: $vpc_id"
+          fi
+
+          echo "vpc_id=$vpc_id" >> $GITHUB_OUTPUT
 
       - name: Login to Amazon ECR
         id: login-ecr
@@ -64,10 +94,9 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ steps.version_bump.outputs.new_version }}
         run: |
-          echo "🏗️ Building image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "✅ Pushed image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "✅ Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
 
       - name: Commit updated package.json
         run: |

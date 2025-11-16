@@ -45,77 +45,41 @@ jobs:
           role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
           aws-region: ${{ secrets.AWS_REGION }}
 
-      # ---------------------------------------------------------
-      # STEP 1: CHECK / CREATE VPC
-      # ---------------------------------------------------------
-      - name: Check and create VPC if missing
-        id: vpc_check
+      # -------------------------------------------------------------------------
+      # STEP 1: CHECK / CREATE CLOUDFORMATION STACK (CC-DEMO-Stack)
+      # -------------------------------------------------------------------------
+      - name: Check and create CloudFormation stack if missing
+        id: cf_stack
         run: |
-          echo "🔍 Checking for VPC named 'CC-DEMO-VPC'..."
+          stack_name="CC-DEMO-Stack"
+          template_path="cloud/aws/stack.yaml"
 
-          vpc_id=$(aws ec2 describe-vpcs \
-            --filters "Name=tag:Name,Values=CC-DEMO-VPC" \
-            --query "Vpcs[0].VpcId" \
-            --output text)
+          echo "🔍 Checking if CloudFormation stack '$stack_name' exists..."
 
-          if [[ "$vpc_id" == "None" ]]; then
-            echo "⚠️ VPC not found. Creating VPC from CloudFormation template..."
+          stack_status=$(aws cloudformation describe-stacks \
+            --stack-name $stack_name \
+            --query "Stacks[0].StackStatus" \
+            --output text 2>/dev/null || echo "NOT_FOUND")
+
+          if [[ "$stack_status" == "NOT_FOUND" ]]; then
+            echo "⚠️ Stack does NOT exist. Creating stack using $template_path ..."
             
-            stack_name="CC-DEMO-VPC-Stack"
-
             aws cloudformation deploy \
               --stack-name $stack_name \
-              --template-file cloud/aws/vpc/vpc.yaml \
-              --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
-
-            aws cloudformation wait stack-create-complete --stack-name $stack_name
-
-            vpc_id=$(aws ec2 describe-vpcs \
-              --filters "Name=tag:Name,Values=CC-DEMO-VPC" \
-              --query "Vpcs[0].VpcId" --output text)
-
-            echo "✅ VPC created: $vpc_id"
-          else
-            echo "✅ VPC already exists: $vpc_id"
-          fi
-
-          echo "vpc_id=$vpc_id" >> $GITHUB_OUTPUT
-
-      # ---------------------------------------------------------
-      # STEP 2: CHECK IF ECS CLUSTER EXISTS — IF NOT CREATE IT
-      # ---------------------------------------------------------
-      - name: Check and create ECS Cluster if missing
-        id: ecs_check
-        run: |
-          echo "🔍 Checking for ECS Cluster 'CC-DEMO-API-CLUSTER'..."
-
-          cluster_exists=$(aws ecs describe-clusters \
-            --clusters CC-DEMO-API-CLUSTER \
-            --query 'clusters[0].status' \
-            --output text 2>/dev/null || true)
-
-          if [[ "$cluster_exists" == "ACTIVE" ]]; then
-            echo "✅ ECS Cluster already exists."
-            echo "cluster_created=false" >> $GITHUB_OUTPUT
-          else
-            echo "⚠️ ECS Cluster not found. Creating using CloudFormation..."
-
-            aws cloudformation deploy \
-              --stack-name CC-DEMO-API-CLUSTER-STACK \
-              --template-file cloud/aws/ecs+lb/create.yaml \
+              --template-file $template_path \
               --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
 
             aws cloudformation wait stack-create-complete \
-              --stack-name CC-DEMO-API-CLUSTER-STACK
+              --stack-name $stack_name
 
-            echo "✅ ECS Cluster created successfully."
-            echo "cluster_created=true" >> $GITHUB_OUTPUT
+            echo "✅ Stack created successfully."
+          else
+            echo "✅ Stack already exists: $stack_status"
           fi
 
-      # ---------------------------------------------------------
-      # STEP 3: BUILD + PUSH DOCKER IMAGE
-      # (Runs ALWAYS — cluster creation does not block build)
-      # ---------------------------------------------------------
+      # -------------------------------------------------------------------------
+      # STEP 2: DOCKER BUILD + PUSH TO ECR
+      # -------------------------------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2
@@ -126,10 +90,14 @@ jobs:
           ECR_REPOSITORY: ${{ secrets.ECR_REPOSITORY }}
           IMAGE_TAG: ${{ steps.version_bump.outputs.new_version }}
         run: |
+          echo "🚀 Building image: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
           docker build -t $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG .
           docker push $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG
-          echo "✅ Image pushed: $ECR_REGISTRY/$ECR_REPOSITORY:$IMAGE_TAG"
+          echo "✅ Image pushed successfully."
 
+      # -------------------------------------------------------------------------
+      # STEP 3: COMMIT UPDATED PACKAGE.JSON BACK TO REPO
+      # -------------------------------------------------------------------------
       - name: Commit updated package.json
         run: |
           new_version=${{ steps.version_bump.outputs.new_version }}

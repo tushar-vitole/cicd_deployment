@@ -1,8 +1,8 @@
 AWSTemplateFormatVersion: "2010-09-09"
-Description: "VPC + ECS Fargate + ALB"
+Description: "Merged Template: VPC + ECS Fargate + ALB (Correct SG + Dependency Ordering)"
 
 # =========================================================================================
-# PARAMETERS (ECS-related only)
+# PARAMETERS
 # =========================================================================================
 Parameters:
 
@@ -178,13 +178,20 @@ Resources:
 
 
 # =========================================================================================
-# ECS + ALB WITH STRICT DEPENDENCY ORDERING
+# STRICT SG / ALB / ECS DEPENDENCY ZONE (FIXED)
 # =========================================================================================
 
+  # ---------------------------------------------------------
+  # LoadBalancerSecurityGroup AFTER VPC is 100% created
+  # ---------------------------------------------------------
   LoadBalancerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
     DependsOn:
-      - PrivateNATRouteTableAssociation
+      - VPC
+      - AttachGateway
+      - PublicSubnet1
+      - PublicSubnet2
+      - PublicRoute
       - PublicSubnetRouteTableAssociation1
       - PublicSubnetRouteTableAssociation2
     Properties:
@@ -196,9 +203,19 @@ Resources:
           ToPort: 80
           CidrIp: 0.0.0.0/0
 
+
+  # ---------------------------------------------------------
+  # ContainerSecurityGroup AFTER LoadBalancerSG + Private networking
+  # ---------------------------------------------------------
   ContainerSecurityGroup:
     Type: AWS::EC2::SecurityGroup
-    DependsOn: LoadBalancerSecurityGroup
+    DependsOn:
+      - LoadBalancerSecurityGroup
+      - PrivateSubnet1
+      - PrivateSubnet2
+      - PrivateSubnetRouteTableAssociation1
+      - PrivateSubnetRouteTableAssociation2
+      - PrivateNATRouteTableAssociation
     Properties:
       GroupDescription: "Allow ALB → ECS"
       VpcId: !Ref VPC
@@ -208,6 +225,10 @@ Resources:
           ToPort: !Ref ContainerPort
           SourceSecurityGroupId: !Ref LoadBalancerSecurityGroup
 
+
+  # ---------------------------------------------------------
+  # ECS Cluster AFTER VPC is ready
+  # ---------------------------------------------------------
   Cluster:
     Type: AWS::ECS::Cluster
     DependsOn:
@@ -246,6 +267,9 @@ Resources:
               awslogs-group: !Ref LogGroup
               awslogs-stream-prefix: "ecs"
 
+  # ---------------------------------------------------------
+  # Load Balancer AFTER SG + Subnets are ready
+  # ---------------------------------------------------------
   LoadBalancer:
     Type: AWS::ElasticLoadBalancingV2::LoadBalancer
     DependsOn:
@@ -285,6 +309,9 @@ Resources:
         - Type: forward
           TargetGroupArn: !Ref TargetGroup
 
+  # ---------------------------------------------------------
+  # ECS Service LAST (depends on EVERYTHING)
+  # ---------------------------------------------------------
   Service:
     Type: AWS::ECS::Service
     DependsOn:

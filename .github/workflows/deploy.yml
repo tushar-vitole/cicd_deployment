@@ -36,7 +36,7 @@ jobs:
           IFS='.' read -r major minor patch <<< "$current_version"
           patch=$((patch + 1))
           new_version="$major.$minor.$patch"
-          npm version $new_version --no-git-tag-version
+          npm version "$new_version" --no-git-tag-version
           echo "new_version=$new_version" >> $GITHUB_OUTPUT
 
       - name: Configure AWS credentials (OIDC)
@@ -46,7 +46,7 @@ jobs:
           aws-region: ${{ secrets.AWS_REGION }}
 
       # ---------------------------------------------------------
-      # STEP: CHECK IF VPC EXISTS — IF NOT, CREATE USING CLOUDFORMATION
+      # STEP 1: CHECK / CREATE VPC
       # ---------------------------------------------------------
       - name: Check and create VPC if missing
         id: vpc_check
@@ -68,22 +68,54 @@ jobs:
               --template-file cloud/aws/vpc/vpc.yaml \
               --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
 
-            echo "⏳ Waiting for VPC stack creation to complete..."
             aws cloudformation wait stack-create-complete --stack-name $stack_name
-            
-            echo "📘 Fetching new VPC Id..."
+
             vpc_id=$(aws ec2 describe-vpcs \
               --filters "Name=tag:Name,Values=CC-DEMO-VPC" \
               --query "Vpcs[0].VpcId" --output text)
 
             echo "✅ VPC created: $vpc_id"
-
           else
             echo "✅ VPC already exists: $vpc_id"
           fi
 
           echo "vpc_id=$vpc_id" >> $GITHUB_OUTPUT
 
+      # ---------------------------------------------------------
+      # STEP 2: CHECK IF ECS CLUSTER EXISTS — IF NOT CREATE IT
+      # ---------------------------------------------------------
+      - name: Check and create ECS Cluster if missing
+        id: ecs_check
+        run: |
+          echo "🔍 Checking for ECS Cluster 'CC-DEMO-API-CLUSTER'..."
+
+          cluster_exists=$(aws ecs describe-clusters \
+            --clusters CC-DEMO-API-CLUSTER \
+            --query 'clusters[0].status' \
+            --output text 2>/dev/null || true)
+
+          if [[ "$cluster_exists" == "ACTIVE" ]]; then
+            echo "✅ ECS Cluster already exists."
+            echo "cluster_created=false" >> $GITHUB_OUTPUT
+          else
+            echo "⚠️ ECS Cluster not found. Creating using CloudFormation..."
+
+            aws cloudformation deploy \
+              --stack-name CC-DEMO-API-CLUSTER-STACK \
+              --template-file cloud/aws/ecs+lb/create.yaml \
+              --capabilities CAPABILITY_NAMED_IAM CAPABILITY_AUTO_EXPAND
+
+            aws cloudformation wait stack-create-complete \
+              --stack-name CC-DEMO-API-CLUSTER-STACK
+
+            echo "✅ ECS Cluster created successfully."
+            echo "cluster_created=true" >> $GITHUB_OUTPUT
+          fi
+
+      # ---------------------------------------------------------
+      # STEP 3: BUILD + PUSH DOCKER IMAGE
+      # (Runs ALWAYS — cluster creation does not block build)
+      # ---------------------------------------------------------
       - name: Login to Amazon ECR
         id: login-ecr
         uses: aws-actions/amazon-ecr-login@v2

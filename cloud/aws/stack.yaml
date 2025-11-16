@@ -70,7 +70,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.0.0/22
-      AvailabilityZone: ap-south-2a
+      AvailabilityZone: ap-south-1a
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
@@ -81,7 +81,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.8.0/22
-      AvailabilityZone: ap-south-2b
+      AvailabilityZone: ap-south-1b
       MapPublicIpOnLaunch: true
       Tags:
         - Key: Name
@@ -142,7 +142,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.4.0/22
-      AvailabilityZone: ap-south-2a
+      AvailabilityZone: ap-south-1a
       Tags:
         - Key: Name
           Value: "CC-DEMO-PrivateSubnet1a"
@@ -152,7 +152,7 @@ Resources:
     Properties:
       VpcId: !Ref VPC
       CidrBlock: 10.0.12.0/22
-      AvailabilityZone: ap-south-2b
+      AvailabilityZone: ap-south-1b
       Tags:
         - Key: Name
           Value: "CC-DEMO-PrivateSubnet2b"
